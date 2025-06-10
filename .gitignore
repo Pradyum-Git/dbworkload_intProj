@@ -1,0 +1,22 @@
+# IDE / system
+.idea/
+.DS_Store
+
+# Python cache & venv
+__pycache__/
+venv*/
+*.pyc
+
+# local runs / debug stuff
+bank run/
+rodan run/
+local-data/
+debug-zips/
+
+# logs, data blobs
+*.log
+*.csv
+
+# build artefacts
+dist/
+build/
