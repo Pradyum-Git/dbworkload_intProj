@@ -6,6 +6,11 @@ import dbworkload.models.util
 import dbworkload.utils.common
 from dbworkload.cli.dep import Param, EPILOG
 import typer
+from enum import Enum
+
+class DataGenMode(str, Enum):
+    SIMPLE = "simple"            # old behaviour
+    CONSTRAINT_AWARE = "constraint-aware"   # new behaviour
 
 
 app = typer.Typer(
@@ -57,8 +62,17 @@ def util_init(
         "-a",
         help="Whether or not to anonymize the workload",
     ),
+    data_gen_mode: DataGenMode = typer.Option(          # ← NEW FLAG
+        DataGenMode.SIMPLE,
+        "--data-gen-mode", "-m",
+        case_sensitive=False,
+        help="Data-generation strategy: "
+             "'simple' (legacy util_yaml/util_csv) "
+             "or 'constraint-aware' (util_yaml_ca/util_csv_ca).",
+        show_default=True,
+    ),
 ):
-    dbworkload.models.util.init(zip_dir, db_name, cloud_storage_uri, cluster_url, anon)
+    dbworkload.models.util.init(zip_dir, db_name, cloud_storage_uri, cluster_url, anon, data_gen_mode)
 
 
 @app.command(

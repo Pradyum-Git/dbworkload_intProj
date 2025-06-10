@@ -1,11 +1,13 @@
 #!/usr/bin/python
 
+import csv
 import datetime as dt
 import gzip
 import itertools
 import logging
 import os
 import shutil
+import subprocess
 import sys
 from io import TextIOWrapper
 from pathlib import PosixPath
@@ -26,6 +28,7 @@ from pytdigest import TDigest
 import dbworkload
 import dbworkload.utils.common
 import dbworkload.utils.simplefaker
+import dbworkload.utils.simplefaker_ca
 from dbworkload.models.ddl_generator import generate_ddls, Column
 from dbworkload.models.workload_generator import generate_workload
 
@@ -133,6 +136,106 @@ def util_csv(
 
             print()
 
+def util_csv_ca(
+    input: PosixPath,
+    output: PosixPath,
+    compression: str,
+    procs: int,
+    csv_max_rows: int,
+    delimiter: str,
+    http_server_hostname: str,
+    http_server_port: str,
+    cloud_storage_uri: str,
+    cluster_url: str,
+):
+    """Wrapper around SimpleFakerCA to create CSV datasets
+    given an input YAML data gen definition file
+    Same as base util csv for the most part, but uses SimpleFakerCA
+    """
+    
+    with open(input, "r") as f:
+        load: dict = yaml.safe_load(f.read())
+
+    if not output:
+        output_dir = dbworkload.utils.common.get_based_name_dir(input)
+    else:
+        output_dir = output
+
+    # backup the current directory as to not override
+    if os.path.isdir(output_dir):
+        os.rename(
+            output_dir,
+            str(output_dir)
+            + "."
+            + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S"),
+        )
+
+    # create new directory
+    os.mkdir(output_dir)
+
+    if not compression:
+        compression = None
+
+    if not procs:
+        procs = os.cpu_count()
+
+    dbworkload.utils.simplefaker_ca.SimpleFakerCA(csv_max_rows=csv_max_rows).generate(
+        load, int(procs), output_dir, delimiter, compression
+    )
+
+    csv_files = os.listdir(output_dir)
+
+    if "gs://" in cloud_storage_uri:
+        try:
+            print(
+                "Attempting to upload files from ",
+                output_dir,
+                " to ",
+                cloud_storage_uri,
+            )
+            subprocess.run(
+                ["gsutil", "-m", "cp", "-r", output_dir, cloud_storage_uri], check=True
+            )
+            print(f"Successfully uploaded {output_dir} to {cloud_storage_uri}")
+
+            try:
+                print("Attempting to IMPORT data")
+                for table_name in load.keys():
+                    for s in dbworkload.utils.common.get_import_stmts(
+                        [x for x in csv_files if x.startswith(table_name)],
+                        table_name,
+                        "",
+                        "",
+                        delimiter,
+                        "",
+                        cloud_storage_uri + "/" + str(output_dir),
+                    ):
+                        print("running cockroach to upload")
+                        subprocess.run(
+                            ["cockroach", "sql", "--url", cluster_url, "-e", s],
+                            check=True,
+                        )
+            except subprocess.CalledProcessError as err:
+                print(f"Error during IMPORT: {err}")
+        except subprocess.CalledProcessError as err:
+            print(f"Error during upload: {err}")
+
+    else:
+        for table_name in load.keys():
+            print(f"=== IMPORT STATEMENTS FOR TABLE {table_name} ===\n")
+
+            for s in dbworkload.utils.common.get_import_stmts(
+                [x for x in csv_files if x.startswith(table_name)],
+                table_name,
+                http_server_hostname,
+                http_server_port,
+                delimiter,
+                "",
+                "",
+            ):
+                print(s, "\n")
+
+            print()
 
 def util_yaml(input: PosixPath, output: PosixPath):
     """Wrapper around util function ddl_to_yaml() for
@@ -159,6 +262,29 @@ def util_yaml(input: PosixPath, output: PosixPath):
     with open(output, "w") as f:
         f.write(dbworkload.utils.common.ddl_to_yaml(ddl))
 
+def util_yaml_ca(all_schemas, ddl_file_name: PosixPath, yaml_file_name: PosixPath):
+    '''Wrapper around util function ddl_to_yaml_ca() for
+    crafting a data gen definition YAML string from
+    CREATE TABLE statements.'''
+
+    with open(ddl_file_name, "r") as f:
+        ddl = f.read()
+
+    if not yaml_file_name:
+        yaml_file_name = dbworkload.utils.common.get_based_name_dir(ddl_file_name) + ".yaml"
+
+    # backup the current file as to not override
+    if os.path.exists(yaml_file_name):
+        os.rename(
+            yaml_file_name,
+            str(yaml_file_name)
+            + "."
+            + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S"),
+        )
+
+    # create new file
+    with open(yaml_file_name, "w") as f:
+        f.write(dbworkload.utils.common.ddl_to_yaml_ca(ddl, all_schemas))
 
 def util_merge_sort(input_dir: str, output_dir: str, csv_max_rows: int, compress: bool):
     from operator import itemgetter
@@ -711,10 +837,13 @@ def util_gen_stub(input_file: PosixPath):
         f.write(template.render(model=model))
 
     logger.info(f"Saved stub '{out}'")
+
+
 # This code has been moved to workload.py
 
+
 # TODO: move this out of the util file into a separate zip file
-def init(zip_dir: PosixPath, db_name, cloud_storage_uri, cluster_url, anonymize):
+def init(zip_dir: PosixPath, db_name, cloud_storage_uri, cluster_url, anonymize, data_gen_mode: str = "simple",):
     if anonymize:
         ddl_file_name = db_name + ".anonymize.schema.sql"
     else:
@@ -728,24 +857,38 @@ def init(zip_dir: PosixPath, db_name, cloud_storage_uri, cluster_url, anonymize)
         zip_dir, db_name, os.path.curdir, cluster_url, ddl_file_name, anonymize
     )
 
-    # # Generate the YAML file.
-    util_yaml(ddl_file_name, yaml_file_name)
-
-    # Generate the CSV file.
-    # TODO: We should parameterize the values we're passing in below, so that
-    #  users can set them themselves.
-    util_csv(
-        yaml_file_name,
-        db_name,
-        "",
-        1,
-        1000000,
-        "\t",
-        "localhost",
-        26257,
-        "",
-        "",
-    )
+    #added a flsg for original vs new constraim aware data generation
+    if data_gen_mode == "simple":
+        # Generate the CSV file.
+        util_yaml(ddl_file_name, yaml_file_name)
+        util_csv(
+            yaml_file_name,
+            db_name,
+            "",
+            1,
+            1000000,
+            "\t",
+            "localhost",
+            26257,
+            "",
+            "",
+        )
+    elif data_gen_mode == "constraint-aware":
+        util_yaml_ca(all_schemas, ddl_file_name,yaml_file_name)
+        util_csv_ca(
+            yaml_file_name,
+            db_name,
+            "",
+            1,
+            1000000,
+            "\t",
+            "localhost",
+            26257,
+            "",
+            "",
+        )
+    else:
+        raise ValueError(f"Unknown data generation mode: {data_gen_mode}")
 
     generate_workload(zip_dir, all_schemas, str(db_name), os.path.curdir, mapping)
     util_gen_stub(PosixPath(sql_file_name))

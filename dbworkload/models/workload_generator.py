@@ -13,7 +13,7 @@ def generate_workload(
     all_schemas: Dict[str, Any],
     db_name: str,
     output_file_location: str,
-    mapping: Dict[str, Any] = None
+    mapping: Dict[str, Any] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Reads a TSV file named 'crdb_internal.node_statement_statistics.txt' from each numeric node directory
@@ -172,14 +172,66 @@ def anonymize_sql_statement(sql_statement: str, mapping: Dict[str, Any]) -> str:
 
     # Step 2: Create a comprehensive list of words to avoid replacing
     avoid_words = {
-        "select", "from", "where", "group", "order", "by", "having", "limit",
-        "insert", "update", "delete", "set", "into", "values", "returning",
-        "join", "inner", "outer", "left", "right", "full", "on", "using",
-        "union", "all", "intersect", "except", "case", "when", "then", "else",
-        "end", "and", "or", "not", "null", "true", "false", "is", "in",
-        "between", "like", "as", "of", "system", "time", "distinct", "exists",
-        "any", "some", "offset", "asc", "desc", "interval", "count", "sum",
-        "avg", "min", "max", "now",
+        "select",
+        "from",
+        "where",
+        "group",
+        "order",
+        "by",
+        "having",
+        "limit",
+        "insert",
+        "update",
+        "delete",
+        "set",
+        "into",
+        "values",
+        "returning",
+        "join",
+        "inner",
+        "outer",
+        "left",
+        "right",
+        "full",
+        "on",
+        "using",
+        "union",
+        "all",
+        "intersect",
+        "except",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "and",
+        "or",
+        "not",
+        "null",
+        "true",
+        "false",
+        "is",
+        "in",
+        "between",
+        "like",
+        "as",
+        "of",
+        "system",
+        "time",
+        "distinct",
+        "exists",
+        "any",
+        "some",
+        "offset",
+        "asc",
+        "desc",
+        "interval",
+        "count",
+        "sum",
+        "avg",
+        "min",
+        "max",
+        "now",
     }
 
     # Step 3: Determine the primary table
@@ -267,4 +319,4 @@ def anonymize_sql_statement(sql_statement: str, mapping: Dict[str, Any]) -> str:
                 r"\b" + re.escape(anon_col) + r"\b" + keyword, keyword, anonymized_sql
             )
 
-    return anonymized_sql 
+    return anonymized_sql

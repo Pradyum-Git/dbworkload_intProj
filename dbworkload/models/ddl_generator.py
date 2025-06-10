@@ -5,6 +5,8 @@ import string
 import subprocess
 import random
 
+from typing import Optional, Tuple, List, Dict
+
 
 def generate_ddls(
     zip_content_location,
@@ -565,7 +567,7 @@ def anonymize_multiple_tables(create_statements, mapping):
 
     return anonymized_statements
 
-
+'''
 class Column:
     def __init__(self, name, col_type, is_nullable, is_primary_key=False):
         self.name = name
@@ -610,7 +612,7 @@ def parse_ddl(ddl):
     - Column names, types, and nullability constraints
     - Primary key columns
     """
-
+    debugPrint(f"Parsing DDL: {ddl}")
     # Extract table name (with schema if present)
     table_match = re.search(
         r'CREATE TABLE IF NOT EXISTS\s+([\w."]+)', ddl, re.IGNORECASE
@@ -647,3 +649,290 @@ def parse_ddl(ddl):
         schema.set_primary_keys(pk_columns)
 
     return schema
+'''
+
+class Column:
+    def __init__(
+        self,
+        name: str,
+        col_type: str,
+        is_nullable: bool,
+        is_primary_key: bool = False,
+        default: Optional[str] = None,
+        is_unique: bool = False,
+        fk_reference: Optional[Tuple[str,str]] = None,
+        inline_check: Optional[str] = None,
+    ):
+        self.name          = name
+        self.col_type      = col_type
+        self.is_nullable   = is_nullable
+        self.is_primary_key= is_primary_key
+        self.default       = default
+        self.is_unique     = is_unique
+        self.fk_reference  = fk_reference
+        self.inline_check   = inline_check
+
+    # what to print when the column is printed
+    def __str__(self):
+        pk_flag     = "PRIMARY KEY" if self.is_primary_key else ""
+        null_status = "NULL" if self.is_nullable else "NOT NULL"
+        default_str = f"DEFAULT {self.default}" if self.default is not None else ""
+        unique_flag = "UNIQUE" if self.is_unique else ""
+        fk_str      = f"FK→{self.fk_reference[0]}.{self.fk_reference[1]}" if self.fk_reference else ""
+        check_str   = f"CHECK({self.inline_check})" if self.inline_check else ""
+
+        parts = [
+            self.name,
+            self.col_type,
+            null_status,
+            pk_flag,
+            default_str,
+            unique_flag,
+            fk_str,
+            check_str
+        ]
+        #parts = [p for p in parts if p]  # filter out empty
+
+        quoted = ",".join(f"'{p}'" for p in parts)
+        return f":-:|{quoted}|:-:"
+
+class TableSchema:
+    def __init__(self, table_name: str):
+        self.table_name        = table_name
+        self.columns: Dict[str, Column] = {}
+        self.primary_keys: List[str]       = []
+        self.unique_constraints: List[List[str]] = []
+        self.foreign_keys: List[Tuple[List[str], str, List[str]]] = []
+        self.check_constraints: List[str]  = []
+
+    def add_column(self, column: Column):
+        self.columns[column.name] = column
+
+    def set_primary_keys(self, pk_columns: List[str]):
+        self.primary_keys = pk_columns
+        single_col_pk = (len(pk_columns) == 1)
+        # for every pk col, setting is_pk = true, is_null = false. is_unique = true only if its not part of a composite pk
+        for pk in pk_columns:
+            if pk in self.columns:
+                self.columns[pk].is_primary_key = True
+                self.columns[pk].is_nullable = False
+                if single_col_pk:                       # can change if causes problems downstream
+                    self.columns[pk].is_unique = True
+
+    def __str__(self):
+        out = [f"Table: {self.table_name}", " Columns:"]
+        for col in self.columns.values():
+            out.append("  " + str(col))
+        if self.primary_keys:
+            out.append(" PKs: " + ", ".join(self.primary_keys))
+        if self.unique_constraints:
+            uq = "; ".join(f"({','.join(u)})" for u in self.unique_constraints)
+            out.append(" UNIQUE: " + uq)
+        if self.foreign_keys:
+            fk = "; ".join(f"({','.join(l)})→{t}({','.join(f)})"
+                           for l,t,f in self.foreign_keys)
+            out.append(" FKs: " + fk)
+        if self.check_constraints:
+            chk = "; ".join(self.check_constraints)
+            out.append(" CHECKs: " + chk)
+        return "\n".join(out) + "\n"
+
+def parse_ddl(ddl: str) -> TableSchema:
+    #debugPrint(f"Parsing DDL: {ddl}")
+
+    # 1) Table name (allow quoted identifiers)
+    # 1) match an identifier: either "..." (anything but ") or unquoted words
+    ident = r'(?:"[^"]+"|[A-Za-z_][\w]*)'
+    # 2) optionally a schema prefix: ident.ident
+    full_ident = rf'({ident}(?:\.{ident})?)'
+
+    # The if not exists was added to all tables upstream if they didnt already have it.
+    table_pattern = re.compile(
+        rf'CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+{full_ident}',
+        re.IGNORECASE
+    )
+
+    m = table_pattern.search(ddl)
+    if not m:
+        raise ValueError("Invalid DDL: no table name")
+    table_name = m.group(1)
+    # strip wrapping quotes
+    table_name = ".".join(part.strip('"') for part in table_name.split("."))
+
+    schema = TableSchema(table_name)
+
+    # 2) Extract body (cols + constraints) and trailing suffix
+    body_match = re.search(r'\((.*)\)\s*([^)]*)$', ddl, re.DOTALL)
+    if not body_match:
+        raise ValueError("Invalid DDL: no column block")
+    cols_and_constraints = body_match.group(1)
+
+    # 3) Top‐level split on commas (balance parentheses)- is fine for now, can maybe write a global func that does this
+    parts, buf, depth = [], "", 0
+    for ch in cols_and_constraints:
+        if ch == "(":
+            depth += 1; buf += ch
+        elif ch == ")":
+            depth -= 1; buf += ch
+        elif ch == "," and depth == 0:
+            parts.append(buf.strip()); buf = ""
+        else:
+            buf += ch
+    if buf.strip():
+        parts.append(buf.strip())
+
+    # 4) Separate column defs vs table‐level constraints
+    col_defs = []
+    table_constraints = []
+    for part in parts:
+        up = part.strip().upper()
+        if (
+            up.startswith("CONSTRAINT")
+            or up.startswith("PRIMARY KEY")
+            or up.startswith("UNIQUE")
+            or up.startswith("FOREIGN KEY")
+            or up.startswith("CHECK")
+            or up.startswith("INDEX")
+        ):
+            table_constraints.append(part)
+        else:
+            col_defs.append(part)
+
+    # 5) Column‐level regex (NOT NULL before NULL; capture inline PK, UNIQUE, DEFAULT, REFERENCES)
+    col_pattern = re.compile(r'''
+        ^\s*
+        ("?[^"]+"|[\w-]+)"?              # 1: column name (quoted or unquoted)
+        \s+([^\s]+)                      # 2: type (with parens allowed)
+        (?:\s+(NOT\s+NULL|NULL))?        # 3: nullability
+        (?:\s+DEFAULT\s+                 # 4: default expression…
+        (                            #    allow nested parens or anything up to next top‐level comma
+            (?:\([^\)]*\))             #    either a parenthesized expr
+            |                          #    or
+            [^\s,]+                    #    a simple literal
+        )
+        )?                               # end default
+        (?:\s+PRIMARY\s+KEY)?            # inline PRIMARY KEY
+        (?:\s+UNIQUE)?                   # inline UNIQUE
+        (?:\s+REFERENCES\s+([\w\.]+)\s*  # 5: FK table
+        \(\s*([\w]+)\s*\)            # 6: FK column
+        )?
+        (?:\s+CHECK\s*\(\s*(.*?)\s*\))?  # 7: inline CHECK(expr)
+        ''', re.IGNORECASE | re.VERBOSE)
+
+    inline_pk_cols: List[str] = [] # collects inline primary key columns
+
+    for cd in col_defs:
+        m = col_pattern.match(cd)
+        if not m:
+            continue
+        name, ctype, null_spec, default, fk_table, fk_col = m.groups()[:6] # not catching the check yet
+        #debugPrint(f"Parsed column: {name}, {ctype}, {null_spec}, {default}, {fk_table}, {fk_col}")
+
+        inline_check = None
+        check_idx = re.search(r'\bCHECK\s*\(', cd, re.IGNORECASE)
+        if check_idx:
+            start = check_idx.end()  # position *after* the '('
+            depth = 1
+            i = start
+            while i < len(cd) and depth:
+                if cd[i] == '(':
+                    depth += 1
+                elif cd[i] == ')':
+                    depth -= 1
+                i += 1
+            # everything between start and i‐1 is the expression
+            inline_check = cd[start : i-1].strip()
+
+        # derive flags - a little redundancy between regex capture and flag implementation, but works accurately still.
+        is_nullable   = (null_spec is None) or (null_spec.upper() == "NULL")
+        is_unique     = bool(re.search(r'\bUNIQUE\b', cd, re.IGNORECASE))
+        is_pk         = bool(re.search(r'\bPRIMARY\s+KEY\b', cd, re.IGNORECASE))
+        fk_ref        = (fk_table, fk_col) if fk_table else None
+
+        # is_pk -> not nullable and unique
+        if is_pk:
+            inline_pk_cols.append(name)
+            is_nullable = False
+            is_unique   = True
+
+        col = Column(
+            name=name.strip('"'),
+            col_type=ctype,
+            is_nullable=is_nullable,
+            is_primary_key=is_pk,
+            default=default.strip() if default else None,
+            is_unique=is_unique,
+            fk_reference=fk_ref,
+            inline_check=inline_check.strip() if inline_check else None
+        )
+        schema.add_column(col)
+
+        if inline_check:
+            schema.check_constraints.append(inline_check.strip())
+
+    if inline_pk_cols:
+        schema.set_primary_keys(inline_pk_cols)
+
+    # 6) Table‐level constraints
+    for tc in table_constraints:
+        up = tc.upper()
+
+        if "PRIMARY KEY" in up:
+            raw = re.search(r'\((.*?)\)', tc).group(1)
+            cols = [
+                col.strip().strip('"').split()[0]
+                for col in raw.split(',')
+            ]
+            schema.set_primary_keys(cols)
+            continue
+
+        # will include unique indexes as well
+        if "UNIQUE" in up:
+            raw = re.search(r'\((.*?)\)', tc).group(1)
+            cols = [
+                col.strip().strip('"').split()[0]
+                for col in raw.split(',')
+            ]
+            is_composite = len(cols) > 1
+            schema.unique_constraints.append(cols)
+            for c in cols:
+                if not is_composite:
+                    schema.columns[c].is_unique = True
+            continue
+
+        if "FOREIGN KEY" in up:
+            m2 = re.search(
+                    r'''FOREIGN\s+KEY\s*\((?P<local>[^\)]*)\)\s+      # FK columns
+                        REFERENCES\s+
+                        (?P<table>
+                            (?:"[^"]+"|[\w]+)                    # first identifier (quoted or bare)
+                            (?:\.(?:"[^"]+"|[\w]+))*             # 0-N ".ident" pieces (schema, catalog…)
+                        )\s*
+                        \((?P<foreign>[^\)]*)\)                  # referenced columns
+                    ''',
+                    tc,
+                    re.IGNORECASE | re.VERBOSE
+                )
+            if m2:
+                local = [c.strip() for c in m2.group(1).split(',')]
+                tbl   = m2.group(2).strip()
+                raw_tbl = tbl.replace('"', '')
+                frgn  = [c.strip() for c in m2.group(3).split(',')]
+                schema.foreign_keys.append((local, raw_tbl, frgn))
+            continue
+
+        if "CHECK" in up:
+            expr = re.search(r'CHECK\s*\((.*)\)', tc, re.IGNORECASE).group(1)
+            schema.check_constraints.append(expr.strip())
+            continue
+
+        if up.startswith("INDEX"):
+        # plain, non-unique secondary index – skip for now
+            continue
+
+    return schema
+
+
+def debugPrint(msg):
+    #print(f"{msg}")
+    pass

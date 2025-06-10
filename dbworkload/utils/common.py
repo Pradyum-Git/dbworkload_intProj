@@ -11,9 +11,12 @@ import urllib.parse
 import numpy as np
 import prometheus_client as prom
 import yaml
+import re
 from prometheus_client.core import REGISTRY, HistogramMetricFamily
 from prometheus_client.registry import Collector
 from pytdigest import TDigest
+
+from dbworkload.models.ddl_generator import Column
 
 RESERVED_WORDS = [
     "unique",
@@ -778,6 +781,199 @@ def ddl_to_yaml(ddl: str):
 
     return yaml.dump(d, default_flow_style=False, sort_keys=False)
 
+def ddl_to_yaml_ca(ddl: str , all_schemas : dict):
+    fanout = 10 #assuming all FKs have a 10:1 relationship - todo, set this to more random
+    yaml_doc = {}
+    col_seed_map = {} #map for seed lookup for fks
+    rng = random.Random() #master RNG for reproducibility
+
+    for table_name, table_schema in all_schemas.items():
+        block: dict = {
+            "count" : 100, #can parametrize later
+            "sort-by" : [],
+            "pk": table_schema.primary_keys[:],
+            "columns": {},
+        }
+        if table_schema.unique_constraints:
+            block["unique"] = table_schema.unique_constraints[:]
+
+        for col in table_schema.columns.values():
+            col_dict = _column_yaml(col, rng, default_prob=0.2)
+            block["columns"][col.name] = col_dict
+
+            # remember seed for FK second pass
+            col_seed_map[(table_name, col.name)] = col_dict["args"].get("seed", 0)
+
+        if table_schema.foreign_keys:
+            # foreign_keys is assumed: List[Tuple[List[str], str, List[str]]]
+            #   (local_cols, parent_table_fqn, parent_cols)
+
+            fk_ids = {}
+            next_fk_id = 1
+
+            for local_cols, parent_tbl_fqn, parent_cols in table_schema.foreign_keys:
+                # Normalise schema (add "public." if missing) and canonicalise
+                if "." not in parent_tbl_fqn:
+                    parent_tbl_fqn = f"public.{parent_tbl_fqn}"
+                parent_canon = _canonical(parent_tbl_fqn)
+
+                fk_sig = (parent_canon, tuple(parent_cols))
+                cid = fk_ids.setdefault(fk_sig, next_fk_id)
+                if cid == next_fk_id:
+                    next_fk_id += 1
+
+                for lc, pc in zip(local_cols, parent_cols):
+                    col_meta = block["columns"][lc]
+                    # If inline FK already filled, keep it; else add
+                    if "fk" not in col_meta:
+                        col_meta["fk"] = f"{parent_canon}.{pc}"
+                        col_meta["hasForeignKey"] = True
+                    if(len(local_cols) > 1):
+                        col_meta["composite_id"] = cid
+
+        yaml_doc[_canonical(table_name)] = [block]
+
+    #filling out fk data in second pass
+    for table_blocks in yaml_doc.values():
+        block = table_blocks[0]
+        for col_name, col_meta in block["columns"].items():
+            fk_info = col_meta.get("fk")
+            if fk_info:
+                parent_table , parent_col = fk_info.split(".")
+                parent_seed = col_seed_map.get((_decanonical(parent_table), parent_col))
+                if parent_seed is not None:
+                    col_meta.setdefault("fk_mode", "block")
+                    col_meta.setdefault("fanout", fanout)
+                    col_meta.setdefault("parent_seed", parent_seed)
+
+    #checking per table: if all pk cols have hasForeignKey set to true, then setting fanout to 1 for all cols within that table. dirty not very elegant but works.
+    for table_blocks in yaml_doc.values():
+        block = table_blocks[0]
+        if all(block["columns"][pk]["hasForeignKey"] for pk in block["pk"]):
+            for col_meta in block["columns"].values():
+                if col_meta.get("hasForeignKey", False):
+                    col_meta["fanout"] = 1
+
+    return yaml.dump(yaml_doc, default_flow_style=False, sort_keys=False)
+
+_SIMPLE_NUM = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
+_QUOTED_STR = re.compile(r"^'.*'$")
+_BOOL_LIT   = re.compile(r"^(true|false)$", re.I)
+def _is_literal_default(expr: str) -> bool:
+    txt = expr.strip().lstrip("(").rstrip(")")
+    return bool(
+        _SIMPLE_NUM.fullmatch(txt) or
+        _QUOTED_STR.fullmatch(txt) or
+        _BOOL_LIT.fullmatch(txt)
+    )
+
+
+def _canonical(name: str) -> str:
+    """schema.table → schema__table to match legacy YAML style"""
+    return name.replace(".", "__")
+
+
+def _decanonical(canon: str) -> str:
+    return canon.replace("__", ".", 1)
+
+def _column_yaml(col: Column, rng: random.Random, default_prob: float):
+    d = {}
+    gen_type, gen_args = _map_sql_type(col.col_type, col, rng)
+    d["type"] = gen_type
+    d["args"] = gen_args
+
+    #nullability
+    d["args"]["null_pct"] = 0.1 if (col.is_nullable and not col.is_primary_key) else 0.0
+    #fk handling
+    if col.fk_reference:
+        parent_table , parent_col = col.fk_reference
+        if "." not in parent_table:
+            parent_table = f"public.{parent_table}"
+        # Canonical form replaces dot with double-underscore so YAML keys stay valid
+        d["fk"] = f"{_canonical(parent_table)}.{parent_col}"
+        d["hasForeignKey"] = True
+    else:
+        d["hasForeignKey"] = False
+
+    #pk, unique
+    if col.is_primary_key:
+        d["isPrimaryKey"] = True
+        d["isUnique"] = True   
+    else:
+        d["isPrimaryKey"] = False
+        d["isUnique"] = col.is_unique
+
+    #default handling
+    if col.default and _is_literal_default(col.default):
+        d["default_prob"] = default_prob
+        d["default"] = col.default.strip()
+
+    return d
+
+_NUMERIC_RE = re.compile(r"^decimal|numeric|float|double|real", re.I)
+_VARCHAR_RE = re.compile(r"^(varchar|character varying)\((\d+)\)", re.I)
+_CHAR_RE = re.compile(r"^char\((\d+)\)$", re.I)
+_BIT_RE   = re.compile(r"^(bit|varbit)(?:\((\d+)\))?", re.I)
+_BYTE_RE  = re.compile(r"^(bytea|blob|bytes)$", re.I)
+
+def _map_sql_type(sql_type: str, col: "Column", rng: random.Random) :
+    sql = sql_type.lower()
+    args = {"seed": rng.randint(0, 100)}
+
+    if sql.startswith("int") or sql in {"integer", "bigint", "smallint", "serial"}:
+        if col.is_primary_key or col.is_unique:
+            return "sequence", {"start": 1, **args}
+        else:
+            args.update(min=-(2**31), max=2**31 - 1)
+            return "integer", args
+
+    if sql == "uuid":
+        return "uuid", args
+    
+    m = _BIT_RE.match(sql)
+    if m:
+        size = int(m.group(2)) if m.group(2) else 1   # default BIT = 1
+        args.update(size=size)
+        return "bit", args
+
+    if _BYTE_RE.match(sql):
+        m = _BYTE_RE.match(sql)
+        args.update(size=int(m.group(2)) if m.group(2) else 1)
+        return "bytes", args
+
+    if _VARCHAR_RE.match(sql):
+        m = _VARCHAR_RE.match(sql)
+        length = int(m.group(2)) if m else 30
+        args.update(min=1, max=length)
+        return "string", args
+    
+    if _CHAR_RE.match(sql):
+        n = int(_CHAR_RE.match(sql).group(1))
+        args.update(min=n, max=n)
+        return "string", args
+
+    if sql in {"text", "clob", "string"}:
+        args.update(min=5, max=30)
+        return "string", args
+
+    if _NUMERIC_RE.match(sql):
+        args.update(min=0, max=1_000_000, round=2)
+        return "float", args
+
+    if sql in {"date"}:
+        args.update(start="2000-01-01", end="2025-01-01", format="%Y-%m-%d")
+        return "date", args
+
+    if sql in {"timestamp", "timestamptz"}:
+        args.update(start="2000-01-01", end="2025-01-01", format="%Y-%m-%d %H:%M:%S.%f")
+        return "timestamp", args
+
+    if sql in {"bool", "boolean"}:
+        return "bool", args
+
+    # fallback to string generator
+    args.update(min=5, max=30)
+    return "string", args
 
 def get_threads_per_proc(procs: int, threads: int):
     """Returns a list of threads count per procs
