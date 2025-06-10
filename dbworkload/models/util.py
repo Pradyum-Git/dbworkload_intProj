@@ -963,4 +963,5 @@ def zip_list(zip_dir: PosixPath):
 
 def debug_print(message: str):
     """Print a debug message."""
-    print(f"DEBUG: {message}")
+    #print(f"DEBUG: {message}")
+    pass

@@ -1075,5 +1075,6 @@ def get_import_stmts(
 _debug_outfile = open("output.txt", "a")
 
 def debugPrint(message):
-    _debug_outfile.write(f"DEBUG: {message}\n")
-    _debug_outfile.flush()
+    pass
+    # _debug_outfile.write(f"DEBUG: {message}\n")
+    # _debug_outfile.flush()

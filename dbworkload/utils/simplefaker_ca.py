@@ -846,4 +846,5 @@ _GEN_CLASS_MAP = {
 debug_outfile = open("faker_output.txt", "a")
 
 def debugPrint(msg: str):
-    print(f"[DEBUG] {msg}", file=debug_outfile, flush=True)
+    pass
+    #print(f"[DEBUG] {msg}", file=debug_outfile, flush=True)
