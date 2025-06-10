@@ -781,13 +781,14 @@ def ddl_to_yaml(ddl: str):
 
     return yaml.dump(d, default_flow_style=False, sort_keys=False)
 
-def ddl_to_yaml_ca(ddl: str , all_schemas : dict):
+def ddl_to_yaml_ca(ddl: str , all_schemas : dict, db_name: str):
     fanout = 10 #assuming all FKs have a 10:1 relationship - todo, set this to more random
     yaml_doc = {}
     col_seed_map = {} #map for seed lookup for fks
     rng = random.Random() #master RNG for reproducibility
 
     for table_name, table_schema in all_schemas.items():
+        debugPrint(f"Processing table: {table_name}")
         block: dict = {
             "count" : 100, #can parametrize later
             "sort-by" : [],
@@ -803,44 +804,66 @@ def ddl_to_yaml_ca(ddl: str , all_schemas : dict):
 
             # remember seed for FK second pass
             col_seed_map[(table_name, col.name)] = col_dict["args"].get("seed", 0)
+            two_level_table_name = f"public__{_canonical(table_name)}"
+            three_level_table_name = f"{db_name}__{_canonical(two_level_table_name)}"
+            col_seed_map[(three_level_table_name, col.name)] = col_dict["args"].get("seed", 0)
+            col_seed_map[(two_level_table_name, col.name)] = col_dict["args"].get("seed", 0)
+            # debugPrint(f"Remembered seed for column: {col.name} in table: {table_name}")
+            # debugPrint(f"Remembered seed for column: {col.name} in table: {two_level_table_name}")
+            # debugPrint(f"Remembered seed for column: {col.name} in table: {three_level_table_name}")
 
         if table_schema.foreign_keys:
             # foreign_keys is assumed: List[Tuple[List[str], str, List[str]]]
             #   (local_cols, parent_table_fqn, parent_cols)
-
+            debugPrint(f"Processing table level foreign keys for table: {table_name}")
             fk_ids = {}
             next_fk_id = 1
 
             for local_cols, parent_tbl_fqn, parent_cols in table_schema.foreign_keys:
                 # Normalise schema (add "public." if missing) and canonicalise
+                debugPrint(f"Processing foreign key: {parent_tbl_fqn}.{parent_cols} referenced by {local_cols}")
                 if "." not in parent_tbl_fqn:
                     parent_tbl_fqn = f"public.{parent_tbl_fqn}"
                 parent_canon = _canonical(parent_tbl_fqn)
-
+                debugPrint(f"parent canon : {parent_canon}")
                 fk_sig = (parent_canon, tuple(parent_cols))
                 cid = fk_ids.setdefault(fk_sig, next_fk_id)
                 if cid == next_fk_id:
                     next_fk_id += 1
 
                 for lc, pc in zip(local_cols, parent_cols):
+                    debugPrint(f"Processing local column: {lc} with parent column: {pc}")
                     col_meta = block["columns"][lc]
                     # If inline FK already filled, keep it; else add
                     if "fk" not in col_meta:
+                        debugPrint("fk wasnt in col meta")
                         col_meta["fk"] = f"{parent_canon}.{pc}"
                         col_meta["hasForeignKey"] = True
+                        debugPrint(f"Added foreign key: {col_meta['fk']} to column: {lc}")
                     if(len(local_cols) > 1):
                         col_meta["composite_id"] = cid
 
         yaml_doc[_canonical(table_name)] = [block]
+        debugPrint(f"Processed table: {table_name}, canonical: {_canonical(table_name)}\n\n")
 
     #filling out fk data in second pass
+    debugPrint("\n\nFilling out foreign key data in second pass")
+    #printing all data inside col seed map
+    for (table_name, col_name), seed in col_seed_map.items():
+        debugPrint(f"Column: {col_name} in table: {table_name} has seed: {seed}")
+    debugPrint("\n\n\n")
     for table_blocks in yaml_doc.values():
         block = table_blocks[0]
         for col_name, col_meta in block["columns"].items():
+            debugPrint(f"Processing column: {col_name}")
             fk_info = col_meta.get("fk")
+            debugPrint(f"Foreign key info: {fk_info}")
             if fk_info:
+                debugPrint(f"Processing foreign key: {fk_info}")
                 parent_table , parent_col = fk_info.split(".")
-                parent_seed = col_seed_map.get((_decanonical(parent_table), parent_col))
+                debugPrint(f"parent table: {parent_table}, parent col: {parent_col}")
+                parent_seed = col_seed_map.get(((parent_table), parent_col))
+                debugPrint(f"parent seed: {parent_seed}")
                 if parent_seed is not None:
                     col_meta.setdefault("fk_mode", "block")
                     col_meta.setdefault("fanout", fanout)
@@ -874,9 +897,10 @@ def _canonical(name: str) -> str:
 
 
 def _decanonical(canon: str) -> str:
-    return canon.replace("__", ".", 1)
+    return canon.replace("__", ".", 2)
 
 def _column_yaml(col: Column, rng: random.Random, default_prob: float):
+    debugPrint(f"Processing column: {col.name}")
     d = {}
     gen_type, gen_args = _map_sql_type(col.col_type, col, rng)
     d["type"] = gen_type
@@ -886,13 +910,16 @@ def _column_yaml(col: Column, rng: random.Random, default_prob: float):
     d["args"]["null_pct"] = 0.1 if (col.is_nullable and not col.is_primary_key) else 0.0
     #fk handling
     if col.fk_reference:
+        debugPrint("foreign key reference found")
         parent_table , parent_col = col.fk_reference
+        debugPrint(f"Processing foreign key: {parent_table}.{parent_col}")
         if "." not in parent_table:
             parent_table = f"public.{parent_table}"
         # Canonical form replaces dot with double-underscore so YAML keys stay valid
         d["fk"] = f"{_canonical(parent_table)}.{parent_col}"
         d["hasForeignKey"] = True
     else:
+        debugPrint("no inline foreign key reference found")
         d["hasForeignKey"] = False
 
     #pk, unique
@@ -1044,3 +1071,9 @@ def get_import_stmts(
             stmts.append(prefix + csv_data[:-2] + mid + delimiter_option + suffix)
 
     return stmts
+
+_debug_outfile = open("output.txt", "a")
+
+def debugPrint(message):
+    _debug_outfile.write(f"DEBUG: {message}\n")
+    _debug_outfile.flush()

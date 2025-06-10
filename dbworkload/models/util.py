@@ -178,7 +178,7 @@ def util_csv_ca(
 
     if not procs:
         procs = os.cpu_count()
-
+    debug_print("calling SimpleFakerCA")
     dbworkload.utils.simplefaker_ca.SimpleFakerCA(csv_max_rows=csv_max_rows).generate(
         load, int(procs), output_dir, delimiter, compression
     )
@@ -262,7 +262,7 @@ def util_yaml(input: PosixPath, output: PosixPath):
     with open(output, "w") as f:
         f.write(dbworkload.utils.common.ddl_to_yaml(ddl))
 
-def util_yaml_ca(all_schemas, ddl_file_name: PosixPath, yaml_file_name: PosixPath):
+def util_yaml_ca(all_schemas, ddl_file_name: PosixPath, yaml_file_name: PosixPath, db_name: str):
     '''Wrapper around util function ddl_to_yaml_ca() for
     crafting a data gen definition YAML string from
     CREATE TABLE statements.'''
@@ -284,7 +284,7 @@ def util_yaml_ca(all_schemas, ddl_file_name: PosixPath, yaml_file_name: PosixPat
 
     # create new file
     with open(yaml_file_name, "w") as f:
-        f.write(dbworkload.utils.common.ddl_to_yaml_ca(ddl, all_schemas))
+        f.write(dbworkload.utils.common.ddl_to_yaml_ca(ddl, all_schemas, db_name))
 
 def util_merge_sort(input_dir: str, output_dir: str, csv_max_rows: int, compress: bool):
     from operator import itemgetter
@@ -844,6 +844,7 @@ def util_gen_stub(input_file: PosixPath):
 
 # TODO: move this out of the util file into a separate zip file
 def init(zip_dir: PosixPath, db_name, cloud_storage_uri, cluster_url, anonymize, data_gen_mode: str = "simple",):
+    debug_print("Initializing...")
     if anonymize:
         ddl_file_name = db_name + ".anonymize.schema.sql"
     else:
@@ -857,7 +858,7 @@ def init(zip_dir: PosixPath, db_name, cloud_storage_uri, cluster_url, anonymize,
         zip_dir, db_name, os.path.curdir, cluster_url, ddl_file_name, anonymize
     )
 
-    #added a flsg for original vs new constraim aware data generation
+    #added a flag for original vs new constraint aware data generation
     if data_gen_mode == "simple":
         # Generate the CSV file.
         util_yaml(ddl_file_name, yaml_file_name)
@@ -874,7 +875,7 @@ def init(zip_dir: PosixPath, db_name, cloud_storage_uri, cluster_url, anonymize,
             "",
         )
     elif data_gen_mode == "constraint-aware":
-        util_yaml_ca(all_schemas, ddl_file_name,yaml_file_name)
+        util_yaml_ca(all_schemas, ddl_file_name,yaml_file_name,db_name)
         util_csv_ca(
             yaml_file_name,
             db_name,
@@ -959,3 +960,7 @@ def zip_list(zip_dir: PosixPath):
     list_databases(zip_dir)
 
     return
+
+def debug_print(message: str):
+    """Print a debug message."""
+    print(f"DEBUG: {message}")

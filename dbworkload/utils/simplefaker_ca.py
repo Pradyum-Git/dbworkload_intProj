@@ -569,12 +569,21 @@ class SimpleFakerCA:
             compression (str): the compression format (gzip, zip, None..)
         """
         # --- parent-column catalog: {(canon_table, col) : (gen_type, gen_args)} ----
+        debugPrint("generate called")
         parent_catalog = {}
         for tbl, blocks in load.items():
             cols = blocks[0]["columns"]
             for col_name, col_meta in cols.items():
+                two_level_table = f"public__{tbl}"
+                three_level_table = f"tpcc__{two_level_table}"
                 parent_catalog[(tbl, col_name)] = (col_meta["type"],
                                                 col_meta["args"])
+                parent_catalog[(two_level_table, col_name)] = (col_meta["type"],
+                                                col_meta["args"])
+                parent_catalog[(three_level_table, col_name)] = (col_meta["type"],
+                                                col_meta["args"])
+                debugPrint(f"added ({col_meta["type"]},{col_meta["args"]}) to parent catalog with keys : ({tbl},{col_name}),({two_level_table},{col_name}),({three_level_table},{col_name})")
+
         self._parent_catalog = parent_catalog
 
         for canon_tbl, blocks in load.items():
@@ -832,3 +841,9 @@ _GEN_CLASS_MAP = {
     "bit":       SimpleFakerCA.Bit,
     "bytes":     SimpleFakerCA.Bytes,
 }
+
+# Open the debug output file outside the function
+debug_outfile = open("faker_output.txt", "a")
+
+def debugPrint(msg: str):
+    print(f"[DEBUG] {msg}", file=debug_outfile, flush=True)

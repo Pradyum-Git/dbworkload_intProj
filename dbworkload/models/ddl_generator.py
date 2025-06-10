@@ -176,6 +176,9 @@ def generate_ddls(
         )
 
     print(f"Successfully wrote {count} create statements to {output_path}")
+    #printing all the schemas
+    for schema in all_schemas.values():
+        print(schema)
     return all_schemas, mapping
 
 
@@ -744,7 +747,7 @@ def parse_ddl(ddl: str) -> TableSchema:
     # 1) match an identifier: either "..." (anything but ") or unquoted words
     ident = r'(?:"[^"]+"|[A-Za-z_][\w]*)'
     # 2) optionally a schema prefix: ident.ident
-    full_ident = rf'({ident}(?:\.{ident})?)'
+    full_ident = rf'({ident}(?:\.{ident}){{0,2}})'
 
     # The if not exists was added to all tables upstream if they didnt already have it.
     table_pattern = re.compile(
@@ -934,5 +937,5 @@ def parse_ddl(ddl: str) -> TableSchema:
 
 
 def debugPrint(msg):
-    #print(f"{msg}")
+    print(f"{msg}")
     pass

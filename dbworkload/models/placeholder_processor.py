@@ -877,5 +877,5 @@ def extract_table_names(statement):
 
 
 def debugPrint(msg):
-    print(f"{msg}")
+    #print(f"{msg}")
     pass
