@@ -37,3 +37,4 @@ UPDATE stock SET s_quantity = CASE (s_i_id, s_w_id) WHEN (_, __more__) THEN _ WH
 SELECT c_discount, c_last, c_credit FROM customer WHERE ((c_w_id = _) AND (c_d_id = _)) AND (c_id = _)
 INSERT INTO new_order(no_o_id, no_d_id, no_w_id) VALUES (_, __more__)
 SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ((ol_w_id = _) AND (ol_d_id = _)) AND (ol_o_id = _)
+SELECT count(DISTINCT s_i_id) FROM order_line JOIN stock ON (s_w_id = _) AND (s_i_id = ol_i_id) WHERE (((ol_w_id = _) AND (ol_d_id = _)) AND (ol_o_id BETWEEN (_) AND (_))) AND (s_quantity < _)

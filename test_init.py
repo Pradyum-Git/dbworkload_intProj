@@ -14,7 +14,7 @@ def main():
         zip_dir=zip_dir,
         db_name="tpcc",
         cloud_storage_uri="",
-        cluster_url="",
+        cluster_url="postgresql://root@localhost:26257?sslmode=disable",
         anonymize=False,
         data_gen_mode="constraint-aware",
     )

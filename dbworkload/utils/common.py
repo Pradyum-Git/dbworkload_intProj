@@ -794,6 +794,7 @@ def ddl_to_yaml_ca(ddl: str , all_schemas : dict, db_name: str):
             "sort-by" : [],
             "pk": table_schema.primary_keys[:],
             "columns": {},
+            "original_table": table_schema.original_table,
         }
         if table_schema.unique_constraints:
             block["unique"] = table_schema.unique_constraints[:]
@@ -936,7 +937,19 @@ def _column_yaml(col: Column, rng: random.Random, default_prob: float):
         d["default"] = col.default.strip()
 
     return d
-
+_DECIMAL_RE = re.compile(r"""
+    ^                       # start of type name
+    (?:decimal|numeric)     # DECIMAL / NUMERIC
+    \s*
+    (?:                     # optional (p[,s])
+        \(\s*
+        (\d+)               # ➀ precision
+        \s*,\s*
+        (\d+)               # ➁ scale
+        \s*\)
+    )?
+    $                       # end
+""", re.I | re.X)
 _NUMERIC_RE = re.compile(r"^decimal|numeric|float|double|real", re.I)
 _VARCHAR_RE = re.compile(r"^(varchar|character varying)\((\d+)\)", re.I)
 _CHAR_RE = re.compile(r"^char\((\d+)\)$", re.I)
@@ -983,8 +996,37 @@ def _map_sql_type(sql_type: str, col: "Column", rng: random.Random) :
         args.update(min=5, max=30)
         return "string", args
 
+    m = _DECIMAL_RE.match(sql)
+    if m:
+        # ------------------------------------------------------------------- p,s ---
+        if m.group(1) is not None:                            # DECIMAL(p,s) form
+            precision = int(m.group(1))
+            scale      = int(m.group(2))
+
+            if precision > 38 or scale > 38:
+                logger.error(
+                    f"Precision {precision} or scale {scale} is too large for DECIMAL."
+                )
+                sys.exit(1)
+
+            int_digits = precision - scale                    # digits left of .
+            if int_digits == 0:                               # e.g. DECIMAL(4,4)
+                step     = 10 ** (-scale)                     # 0.0001
+                max_val  = 1 - step                           # 0.9999
+                min_val  = -max_val                           # -0.9999
+            else:                                             # normal case
+                max_val = 10 ** int_digits - 1                # e.g. 9999 for (6,2)
+                min_val = -max_val - 1                        # -10000  (symmetric)
+
+            args.update(min=min_val, max=max_val, round=scale)
+        # ------------------------------------------------------------- DECIMAL w/o ()
+        else:                                                 # plain DECIMAL / NUMERIC
+            args.update(min=0, max=1, round=2)
+
+        return "float", args
+
     if _NUMERIC_RE.match(sql):
-        args.update(min=0, max=1_000_000, round=2)
+        args.update(min=0, max=1, round=2)
         return "float", args
 
     if sql in {"date"}:
@@ -1034,6 +1076,7 @@ def get_import_stmts(
     delimiter: str = "",
     nullif: str = "",
     uri: str = "",
+    original_table: str = "",
 ):
     def chunks(lst, n):
         """Yield successive n-sized chunks from lst."""
@@ -1050,7 +1093,7 @@ def get_import_stmts(
 
     # For some reason, the yaml file has the "." in the schema replaced
     # by "__". Fix that here.
-    new_table_name = table_name.replace("__", ".")
+    new_table_name = original_table.replace("__", ".")
 
     prefix = f"IMPORT INTO {new_table_name} CSV DATA ("
     mid = ") WITH delimiter = "

@@ -6,6 +6,7 @@ import psycopg
 import random
 import time
 from uuid import uuid4
+from dbworkload.templates.workload_data import gvs_from_bind
 
 class {{ model.name }}:
     def __init__(self, args: dict):
@@ -87,10 +88,10 @@ class {{ model.name }}:
                 """,
                 (
                 {%- for bind_param in model.bind_params[x][stmt_index] %}
-                    generate_random_value({{bind_param}}),
+                    gvs_from_bind({{bind_param}}),
                 {%- endfor %}
                 ),
-            ){% if model.txn_type[x] %}.fetchall(){% endif %}
+            ){% if model.txn_type[x][stmt_index] %}.fetchall(){% endif %}
                     {%- endif -%}
                 {%- endif -%}
             {%- endfor %}

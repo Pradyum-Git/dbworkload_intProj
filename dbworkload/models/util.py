@@ -200,17 +200,19 @@ def util_csv_ca(
 
             try:
                 print("Attempting to IMPORT data")
-                for table_name in load.keys():
+                for table_name,blocks in load.items():
                     for s in dbworkload.utils.common.get_import_stmts(
-                        [x for x in csv_files if x.startswith(table_name)],
+                        [x for x in csv_files if x.startswith(f"{table_name}.")],
                         table_name,
                         "",
                         "",
                         delimiter,
                         "",
                         cloud_storage_uri + "/" + str(output_dir),
+                        original_table=blocks[0].get("original_table") if blocks else None
                     ):
                         print("running cockroach to upload")
+                        print(f"import statement : {s}\n")
                         subprocess.run(
                             ["cockroach", "sql", "--url", cluster_url, "-e", s],
                             check=True,
@@ -819,19 +821,28 @@ def util_gen_stub(input_file: PosixPath):
         for txn in transactions
     ]
 
-    txn_type = []
     model["bind_params"] = []
-    for txn in transactions:
-        txn_type.append(
-            txn.lower().startswith("select") or txn.lower().find("returning") > 0
-        )
-        statements = txn.split(";")
-        stmt_placeholder = []
-        for stmt in statements:
+    model["txn_type"]    = []          # <-- now list-of-lists
+
+    for txn in transactions:           # txn may contain many SQL stmts
+        stmt_flags       = []          # flags for this *txn*
+        stmt_placeholders = []
+
+        for stmt in (s.strip() for s in txn.split(";") if s.strip()):
+            # ----- does *this* statement return rows? -----------------
+            lower_stmt = stmt.lower()
+            returns_rows = (
+                lower_stmt.startswith("select")            # plain SELECT
+                or " returning " in lower_stmt             # INSERT … RETURNING …
+            )
+            stmt_flags.append(returns_rows)
+
+            # ----- bind-parameter placeholders for this stmt ----------
             placeholders = re.findall(r":-:\|(.*?)\|:-:", stmt)
-            stmt_placeholder.append(placeholders)
-        model["bind_params"].append(stmt_placeholder)
-    model["txn_type"] = txn_type
+            stmt_placeholders.append(placeholders)
+
+        model["txn_type"].append(stmt_flags)
+        model["bind_params"].append(stmt_placeholders)
 
     with open(out, "w") as f:
         f.write(template.render(model=model))
@@ -845,6 +856,7 @@ def util_gen_stub(input_file: PosixPath):
 # TODO: move this out of the util file into a separate zip file
 def init(zip_dir: PosixPath, db_name, cloud_storage_uri, cluster_url, anonymize, data_gen_mode: str = "simple",):
     debug_print("Initializing...")
+    print(f"params- zip dir : {zip_dir}, cloud_storage_uri: {cloud_storage_uri}, cluster_url: {cluster_url}, anonymize: {anonymize}, data_gen_mode: {data_gen_mode}")
     if anonymize:
         ddl_file_name = db_name + ".anonymize.schema.sql"
     else:
@@ -885,8 +897,8 @@ def init(zip_dir: PosixPath, db_name, cloud_storage_uri, cluster_url, anonymize,
             "\t",
             "localhost",
             26257,
-            "",
-            "",
+            "gs://ajstorm/",
+            cluster_url,
         )
     else:
         raise ValueError(f"Unknown data generation mode: {data_gen_mode}")

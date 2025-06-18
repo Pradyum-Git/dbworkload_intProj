@@ -25,7 +25,6 @@ def generate_ddls(
     We only retain the MOST RECENT CREATE statement for each table, but preserve the
     ordering of the table's first appearance in the file.
     """
-
     create_statement_file_name = "crdb_internal.create_statements.txt"
     file_path = os.path.join(zip_content_location, create_statement_file_name)
 
@@ -175,10 +174,11 @@ def generate_ddls(
             ["cockroach", "sql", "--url", cluster_url, "-f", output_path], check=True
         )
 
-    print(f"Successfully wrote {count} create statements to {output_path}")
+    # print(f"Successfully wrote {count} create statements to {output_path}")
     #printing all the schemas
     for schema in all_schemas.values():
         print(schema)
+        print(f"original table: {schema.original_table}")
     return all_schemas, mapping
 
 
@@ -700,13 +700,14 @@ class Column:
         return f":-:|{quoted}|:-:"
 
 class TableSchema:
-    def __init__(self, table_name: str):
+    def __init__(self, table_name: str, original_table: str):
         self.table_name        = table_name
         self.columns: Dict[str, Column] = {}
         self.primary_keys: List[str]       = []
         self.unique_constraints: List[List[str]] = []
         self.foreign_keys: List[Tuple[List[str], str, List[str]]] = []
         self.check_constraints: List[str]  = []
+        self.original_table = original_table
 
     def add_column(self, column: Column):
         self.columns[column.name] = column
@@ -760,9 +761,11 @@ def parse_ddl(ddl: str) -> TableSchema:
         raise ValueError("Invalid DDL: no table name")
     table_name = m.group(1)
     # strip wrapping quotes
+    original_table = table_name
     table_name = ".".join(part.strip('"') for part in table_name.split("."))
 
-    schema = TableSchema(table_name)
+    schema = TableSchema(table_name,original_table)
+
 
     # 2) Extract body (cols + constraints) and trailing suffix
     body_match = re.search(r'\((.*)\)\s*([^)]*)$', ddl, re.DOTALL)

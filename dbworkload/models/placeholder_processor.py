@@ -30,7 +30,7 @@ def replace_placeholders(sql, all_schemas):
         # 1) build a single–tuple placeholder
         column_names = [c.strip() for c in cols.split(",")]
         one_ph = (
-            "(" + ", ".join(get_field_column(schemas, c) for c in column_names) + ")"
+            "(" + ", ".join(_tag(get_field_column(schemas, c), 'INSERT') for c in column_names) + ")"
         )
 
         # 2) split on “) , (” with any amount of space
@@ -127,6 +127,10 @@ def replace_tokens(sql, schemas):
                 statement += " "  # exhausted all whitespaces
             query_index += 1
             statement += str(random.randint(1, 100))
+        elif isinstance(token, sqlparse.sql.Parenthesis):
+            rewritten, next_index = process_parenthesis_token(token, query.tokens, query_index, schemas)
+            statement += rewritten
+            query_index = next_index
         else:
             query_index += 1
             statement += token.value
@@ -154,7 +158,7 @@ def process_select_statements(token, schemas):
         if not m:
             return expr
         col = m.group(1).strip()
-        ph = get_field_column(schemas, col)
+        ph = _tag(get_field_column(schemas, col),'WHERE')
         # replace the trailing ", _)" with ", <ph>)"
         return re.sub(r"(,\s*)_(\s*\))", rf"\1{ph}\2", expr)
 
@@ -162,7 +166,7 @@ def process_select_statements(token, schemas):
         # Match IFNULL(col, _)
         def repl(m):
             col = m.group(1).strip()
-            ph = get_field_column(schemas, col)
+            ph = _tag(get_field_column(schemas, col),'WHERE')
             return f"IFNULL({col}, {ph})"
 
         return re.sub(
@@ -230,65 +234,6 @@ def extract_where_condition(tokens, idx, schemas):
         return token.value, idx + 1
 
 
-'''def process_identifier_token(tokens, idx, schemas):
-    token = tokens[idx]
-    condition = token.value
-    new_index = idx + 1
-    while new_index < len(tokens) and tokens[new_index].is_whitespace:
-        condition += " "
-        new_index += 1
-    if new_index < len(tokens) and tokens[new_index].value.strip().upper() == "IN":
-        condition += tokens[new_index].value
-        new_index += 1
-        while new_index < len(tokens) and tokens[new_index].is_whitespace:
-            condition += " "
-            new_index += 1
-        if (
-            new_index < len(tokens)
-            and isinstance(tokens[new_index], sqlparse.sql.Parenthesis)
-            and len(tokens[new_index].tokens) > 1
-            and isinstance(tokens[new_index].tokens[1], sqlparse.sql.IdentifierList)
-        ):
-            condition += f"({get_field_column(schemas, token.value)}, {get_field_column(schemas, token.value)})"
-            return condition, new_index + 1
-        elif (
-            new_index < len(tokens)
-            and isinstance(tokens[new_index], sqlparse.sql.Parenthesis)
-            and len(tokens[new_index].tokens) > 1
-            and tokens[new_index].tokens[1].is_keyword
-        ):
-            return (
-                f"{condition}({replace_tokens(tokens[new_index].value[1:-1], schemas)})",
-                new_index + 1,
-            )
-
-    if new_index < len(tokens) and tokens[new_index].value.strip().upper() == "BETWEEN":
-        condition += tokens[new_index].value
-        new_index += 1
-        while new_index < len(tokens) and tokens[new_index].is_whitespace:
-            condition += " "
-            new_index += 1
-        if new_index < len(tokens) and isinstance(
-            tokens[new_index], sqlparse.sql.Parenthesis
-        ):
-            condition += f"({get_field_column(schemas, token.value)})"
-            new_index += 1
-            while new_index < len(tokens) and (
-                tokens[new_index].is_whitespace
-                or (
-                    hasattr(tokens[new_index], "value")
-                    and tokens[new_index].value.strip() == "AND"
-                )
-            ):
-                condition += tokens[new_index].value
-                new_index += 1
-            if new_index < len(tokens) and isinstance(
-                tokens[new_index], sqlparse.sql.Parenthesis
-            ):
-                condition += f"({get_field_column(schemas, token.value)})"
-                return condition, new_index + 1
-    return condition, new_index'''
-
 def process_identifier_token(tokens, idx, schemas):
     token = tokens[idx]
     condition = token.value       # e.g. "order_date" or "acc_no"
@@ -319,7 +264,7 @@ def process_identifier_token(tokens, idx, schemas):
         ):
             # find the IdentifierList inside the parentheses
             # (sqlparse nests comma-separated items there)
-            ph        = get_field_column(schemas, token.value)   # single placeholder
+            ph = _tag(get_field_column(schemas, token.value), 'WHERE')   # single placeholder tagged with WHERE
             num_vals  = random.randint(2, 5)                     # 2-5 values
             in_list   = ", ".join([ph] * num_vals)
 
@@ -340,7 +285,7 @@ def process_identifier_token(tokens, idx, schemas):
         # helper to emit one operand (bare or inside parens)
         def _emit_operand():
             nonlocal new_index, condition
-            ph = get_field_column(schemas, token.value)
+            ph = _tag(get_field_column(schemas, token.value), 'WHERE')
             if (
                 new_index < len(tokens)
                 and isinstance(tokens[new_index], sqlparse.sql.Parenthesis)
@@ -392,7 +337,7 @@ def process_comparison_token(token, schemas):
     #)
     if "_::INTERVAL" in value:
         field = re.sub(
-            r"TIMESTAMP(TZ)?", "INTERVAL", get_field_column(schemas, key.strip())
+            r"TIMESTAMP(TZ)?", "INTERVAL", _tag(get_field_column(schemas, key.strip()), 'WHERE')
         )
         new_val = value.replace("_::INTERVAL", f"{field}::INTERVAL")
         return f"{key}{operator.strip()}{new_val}"
@@ -402,64 +347,19 @@ def process_comparison_token(token, schemas):
         col_names = [c.strip() for c in key.strip()[1:-1].split(",")]
 
         # for each column, look up its placeholder via get_field_column(...)
-        placeholders = ", ".join(get_field_column(schemas, col) for col in col_names)
+        placeholders = ", ".join(_tag(get_field_column(schemas, col), 'WHERE') for col in col_names)
 
         # re-assemble:   (col1, col2, col3) = (<ph1>, <ph2>, <ph3>)
         return f"{key}{operator.strip()}({placeholders})"
     else:
         new_val = re.sub(
             r"(?<![a-zA-Z0-9_])_(?![a-zA-Z0-9_])",
-            get_field_column(schemas, key.strip()),
+            _tag(get_field_column(schemas, key.strip()), 'WHERE'),
             value,
         )
         return f"{key}{operator}{new_val}"
 
-'''
-def process_parenthesis_token(token, parent_tokens, parent_index, schemas):
-    debugPrint("\ninside process_parenthesis_token")
-    for sub_token in token.tokens:
-        debugPrint(
-            f"▶ DEBUG: matched token → `{sub_token.value}`, type : {sub_token.ttype}"
-        )
-    if len(token.tokens) > 1 and isinstance(
-        token.tokens[1], sqlparse.sql.IdentifierList
-    ):
-        condition = token.tokens[0].value  # Opening parenthesis
-        sub_index = 1
-        fields = [field.strip() for field in token.tokens[1].value.split(",")]
-        condition += token.tokens[sub_index].value
-        sub_index += 1
-        condition += token.tokens[sub_index].value  # Add keyword after identifier list
-        new_index = parent_index + 1
-        while new_index < len(parent_tokens) and parent_tokens[new_index].is_whitespace:
-            condition += " "
-            new_index += 1
-        if (
-            new_index < len(parent_tokens)
-            and parent_tokens[new_index].value.strip().upper() == "IN"
-        ):
-            condition += parent_tokens[new_index].value
-            new_index += 1
-        while new_index < len(parent_tokens) and parent_tokens[new_index].is_whitespace:
-            condition += " "
-            new_index += 1
-        if new_index < len(parent_tokens) and isinstance(
-            parent_tokens[new_index], sqlparse.sql.Parenthesis
-        ):
-            mapped_fields = ", ".join(
-                f"({get_field_column(schemas, field)}, {get_field_column(schemas, field)})"
-                for field in fields
-            )
-            condition += f"({mapped_fields})"
-            return condition, new_index + 1
-    else:
-        index = 1
-        inner_conditions = "("
-        while index < len(token.tokens):
-            cond, index = extract_where_condition(token.tokens, index, schemas)
-            inner_conditions += cond
-        return inner_conditions, parent_index + 1
-'''
+
 
 def process_parenthesis_token(token, parent_tokens, parent_index, schemas):
     """
@@ -507,7 +407,7 @@ def process_parenthesis_token(token, parent_tokens, parent_index, schemas):
             # --------- NEW: build 3-5 fresh tuples, ignore original rows -----
             num_rows   = random.randint(3, 5)           # ← change to 2-5 if you prefer
             tuple_ph   = "(" + ", ".join(
-                            get_field_column(schemas, f) for f in fields
+                            _tag(get_field_column(schemas, f), 'WHERE') for f in fields
                          ) + ")"
             in_list    = ", ".join([tuple_ph] * num_rows)
 
@@ -559,58 +459,6 @@ def get_system_time():
     ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-"""def extract_set_conditions(sql, schemas):
-    def replace_set_clause(set_match):
-        # The SET clause captured by group(3)
-        set_str = set_match.group(3).strip()
-
-        # Check if it is in the tuple form: (field1, field2) - (value1, value2)
-        tuple_form = re.match(r"^\((.*?)\)\s*[-=]\s*\((.*?)\)$", set_str)
-        if tuple_form:
-            fields_str = tuple_form.group(1).strip()
-            values_str = tuple_form.group(2).strip()
-
-            fields = [f.strip() for f in fields_str.split(",")]
-            values = [v.strip() for v in values_str.split(",")]
-            set_clause = []
-            for field, value in zip(fields, values):
-                new_val = get_field_column(schemas, field)
-                if value is not None:
-                    # Replace the value with the dynamic value from schemas (or any processing)
-                    new_val = re.sub(
-                        r"(?<![a-zA-Z0-9_])_(?![a-zA-Z0-9_])", new_val, value
-                    )
-                set_clause.append(f"{field} = {new_val}")
-            set_clause_str = ", ".join(set_clause)
-        else:
-            # Original "field=value" format (comma-separated)
-            set_clause = []
-            set_pairs = [pair.strip() for pair in set_str.split(",")]
-            for set_pair in set_pairs:
-                kv = [x.strip() for x in set_pair.split("=")]
-                if len(kv) != 2:
-                    continue  # or raise an error if appropriate
-                field = kv[0]
-                value = kv[1]
-                new_val = get_field_column(schemas, field)
-                if value is not None:
-                    # Replace the value with the dynamic value from schemas (or any processing)
-                    new_val = re.sub(
-                        r"(?<![a-zA-Z0-9_])_(?![a-zA-Z0-9_])", new_val, value
-                    )
-                set_clause.append(f"{field} = {new_val}")
-            set_clause_str = ", ".join(set_clause)
-
-        return f"{set_match.group(1)}{set_match.group(2)}{set_clause_str}{set_match.group(4)}"
-
-    # Match SET clause and stop at termination keywords (WHERE, ORDER BY, GROUP BY, LIMIT, etc.)
-    return re.sub(
-        r"(UPDATE\s+[\w.]+)(\s+SET\s+)(.+?)(\s+WHERE|\s+ORDER BY|\s+GROUP BY|\s+LIMIT|\s*;|$)",
-        replace_set_clause,
-        sql,
-        flags=re.IGNORECASE,
-    )"""
-
 
 def extract_set_conditions(sql, schemas):
     def split_top_level_commas(s: str) -> list[str]:
@@ -651,8 +499,8 @@ def extract_set_conditions(sql, schemas):
             key_cols    = [scal.group(1)]
             tuple_mode  = False
 
-        key_ph  = [get_field_column(schemas, c) for c in key_cols]
-        tgt_ph  = get_field_column(schemas, target_col)
+        key_ph  = [_tag(get_field_column(schemas, c), 'WHERE') for c in key_cols]
+        tgt_ph  = _tag(get_field_column(schemas, target_col), 'UPDATE')
 
         if tuple_mode:
             tuple_ph = '(' + ', '.join(key_ph) + ')'
@@ -711,7 +559,7 @@ def extract_set_conditions(sql, schemas):
                     continue
                 try:
                     # raises KeyError if the column is unknown
-                    get_field_column(schemas, ident)
+                    _tag(get_field_column(schemas, ident), 'WHERE')
                     return ident
                 except KeyError:
                     continue
@@ -734,7 +582,7 @@ def extract_set_conditions(sql, schemas):
                 if "CASE" in p.upper():                # rewrite CASE … THEN _
                     p = rewrite_case_expr(p, tgt, schemas)
 
-                ph = get_field_column(schemas, tgt)    # placeholder for that column
+                ph = _tag(get_field_column(schemas, tgt), 'WHERE')    # placeholder for that column, tagged with WHERE
                 p  = re.sub(r"(?<!\w)_(?!\w)", ph, p)  # stand-alone “_”
                 p  = p.replace("__more__", ph)         # “__more__”
 
@@ -764,7 +612,7 @@ def extract_set_conditions(sql, schemas):
 
             assignments = []
             for field, val in zip(fields, values):
-                ph = get_field_column(schemas, field)
+                ph = _tag(get_field_column(schemas, field), 'UPDATE')
                 # replace standalone "_" and "__more__" with the placeholder
                 val = re.sub(r"(?<!\w)_(?!\w)", ph, val)
                 val = val.replace("__more__", ph)
@@ -790,7 +638,7 @@ def extract_set_conditions(sql, schemas):
                     rewritten = rewrite_case_expr('CASE' + case_part, field, schemas)
                     val = before + rewritten
 
-                ph = get_field_column(schemas, field)
+                ph = _tag(get_field_column(schemas, field), 'UPDATE')
                 val = re.sub(r"(?<!\w)_(?!\w)", ph, val)
                 val = val.replace("__more__", ph)
                 assignments.append(f"{field} = {val}")
@@ -875,6 +723,14 @@ def extract_table_names(statement):
 
     return list(filter(None, table_names))
 
+def _tag(ph: str, role: str) -> str:
+    """
+    Append a role label just before the closing '|:-:'.
+    Example:
+        original ⇒ ":-:|'w_id','INT8',…|:-:"
+        tagged   ⇒ ":-:|'w_id','INT8',…,'INSERT'|:-:"
+    """
+    return ph[:-4] + f",'{role}'|:-:"
 
 def debugPrint(msg):
     #print(f"{msg}")

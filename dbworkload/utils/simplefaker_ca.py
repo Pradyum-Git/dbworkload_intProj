@@ -17,6 +17,8 @@ from .common import import_class_at_runtime
 logger = logging.getLogger("dbworkload")
 USE_DB_DEFAULT = object()      # unique marker
 
+genDict = {}
+
 def _support_seed(cls) -> bool:
     """Check if the class supports seeding."""
     sig = inspect.signature(cls.__init__)
@@ -26,19 +28,25 @@ def _support_seed(cls) -> bool:
 class FKBlockWrapper:
     """Repeat each parent key `fanout` times for deterministic FK blocks."""
     def __init__(self,
-                 parent_cls,            # generator *class* (not instance)
-                 parent_args,           # dict without the 'seed'
-                 parent_seed: float,
-                 fanout: int           = 10,
-                 needs_unique: bool    = False):
-        # give every worker process a disjoint slice of the parent stream
-        accepted = inspect.signature(parent_cls.__init__).parameters
-        kwargs = {k: v for k, v in parent_args.items() if k in accepted}
-        if _support_seed(parent_cls):
-            kwargs["seed"] = parent_seed
-        base_gen = parent_cls(**kwargs)
-        if needs_unique:
-            base_gen = UniqueWrapper(base_gen)
+                faker,               # ← SimpleFakerCA instance
+                parent_type: str,    # "integer", "uuid", or "fkblockwrapper"
+                parent_args: dict,
+                parent_meta: dict,
+                parent_count: int,
+                exec_threads: int,
+                parent_seed: float,
+                fanout: int = 10):
+        args_for_factory = {
+            **parent_args,
+            "_col_meta": parent_meta,
+            "seed": parent_seed
+        }
+        base_gen = faker.get_simplefaker_objects(
+            parent_type,
+            args_for_factory,
+            parent_count,
+            exec_threads=1,
+        )[0]
 
         self.parent_it = base_gen
         self.fanout    = max(1, fanout)
@@ -144,7 +152,7 @@ class SimpleFakerCA:
 
         def __next__(self):
             if self.null_pct and self.rng.random() < self.null_pct:
-                return ""
+                return None
             else:
                 if not self.array:
                     return uuid.UUID(int=self.rng.getrandbits(128), version=4)
@@ -175,7 +183,7 @@ class SimpleFakerCA:
 
         def __next__(self):
             if self.null_pct and self.rng.random() < self.null_pct:
-                return ""
+                return None
             else:
                 if not self.array:
                     return dt.datetime.fromtimestamp(
@@ -329,7 +337,7 @@ class SimpleFakerCA:
 
         def __next__(self):
             if self.null_pct and self.rng.random() < self.null_pct:
-                return ""
+                return None
             else:
                 if not self.array:
                     return self.rng.randint(self.min_num, self.max_num)
@@ -411,7 +419,7 @@ class SimpleFakerCA:
 
         def __next__(self):
             if self.null_pct and self.rng.random() < self.null_pct:
-                return ""
+                return None
             else:
                 if not self.array:
                     return round(self.rng.uniform(self.min, self.max), self.round)
@@ -447,7 +455,7 @@ class SimpleFakerCA:
 
         def __next__(self):
             if self.null_pct and self.rng.random() < self.null_pct:
-                return ""
+                return None
             else:
                 if not self.array:
                     return "\\x" + (
@@ -577,11 +585,11 @@ class SimpleFakerCA:
                 two_level_table = f"public__{tbl}"
                 three_level_table = f"tpcc__{two_level_table}"
                 parent_catalog[(tbl, col_name)] = (col_meta["type"],
-                                                col_meta["args"])
+                                                col_meta["args"],col_meta, blocks[0]["count"])
                 parent_catalog[(two_level_table, col_name)] = (col_meta["type"],
-                                                col_meta["args"])
+                                                col_meta["args"],col_meta, blocks[0]["count"])
                 parent_catalog[(three_level_table, col_name)] = (col_meta["type"],
-                                                col_meta["args"])
+                                                col_meta["args"],col_meta, blocks[0]["count"])
                 debugPrint(f"added ({col_meta["type"]},{col_meta["args"]}) to parent catalog with keys : ({tbl},{col_name}),({two_level_table},{col_name}),({three_level_table},{col_name})")
 
         self._parent_catalog = parent_catalog
@@ -608,6 +616,7 @@ class SimpleFakerCA:
                         item["count"],
                         exec_threads,
                     )
+                    genDict[col] = item["columns"][col]
 
                 # create a zip object so that generators are paired together
                 z = zip(*[x for x in item["columns"].values()])
@@ -707,7 +716,7 @@ class SimpleFakerCA:
         # --- FK wrapper ----------------------------------------------------
         if col_meta.get("hasForeignKey") :
             canon_parent, parent_col = col_meta["fk"].split(".")
-            p_type, p_args = self._parent_catalog[(canon_parent, parent_col)]
+            p_type, p_args, p_meta, p_count = self._parent_catalog[(canon_parent, parent_col)]
 
             parent_cls = _GEN_CLASS_MAP[p_type]
             p_args     = {k: v for k, v in p_args.items() if k != "seed"}
@@ -725,11 +734,14 @@ class SimpleFakerCA:
 
             base_gens = [
                 FKBlockWrapper(
-                    parent_cls,
+                    self,
+                    p_type,
                     p_args,
-                    parent_thread_seeds[i],     # << same seed the parent used
+                    p_meta,
+                    p_count,
+                    exec_threads,
+                    parent_thread_seeds[i],
                     fanout=fan,
-                    needs_unique=needs_unique_parent,
                 )
                 for i in range(exec_threads)
             ]
@@ -759,10 +771,21 @@ class SimpleFakerCA:
             compression (str): the compression format (gzip, zip, None..)
         """
 
+        def _nullable_dtype(gen_class):
+            if gen_class in (SimpleFakerCA.Integer, SimpleFakerCA.Sequence):
+                return "Int64"
+            if gen_class is SimpleFakerCA.Float:
+                return "Float64"
+            if gen_class is SimpleFakerCA.Bool:
+                return "boolean"
+            # strings / timestamps / bytes → leave default (`object`)
+            return None
+
+
         def gen_to_csv(iters: int):
             # create individual Series and then concat them together
             df = pd.concat(
-                [pd.Series([next(gen) for _ in range(iters)]) for gen in generators],
+                [pd.Series([next(gen) for _ in range(iters)],dtype = _nullable_dtype(type(gen))) for gen in generators],
                 axis=1,
                 keys=col_names,
             )
@@ -846,5 +869,5 @@ _GEN_CLASS_MAP = {
 debug_outfile = open("faker_output.txt", "a")
 
 def debugPrint(msg: str):
-    pass
-    #print(f"[DEBUG] {msg}", file=debug_outfile, flush=True)
+    #pass
+    print(f"[DEBUG] {msg}", file=debug_outfile, flush=True)
